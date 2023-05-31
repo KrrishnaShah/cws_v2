@@ -55,26 +55,107 @@ typedef struct s_flash_header {
   uint32_t count;
 } s_flash_header_t;
 
+typedef struct s_flash_header_v2 {
+  uint32_t magic;
+  uint32_t count;
+  uint32_t write_addr;
+  uint32_t read_addr;
+} s_flash_header_v2_t;
+
 
 static const char *ble_gateway_name = "cws-gateway";
-static s_flash_header_t flash_header;
 static const char *cws_data_char_uuid = "e202";
 // static const char *cws_data_char_uuid = "0000e202-0000-1000-8000-00805f9b34fb";
-static const char *cws_time_char_uuid = "0000e203-0000-1000-8000-00805f9b34fb";
+static const char *cws_time_char_uuid = "e203";
+// static const char *cws_time_char_uuid = "0000e203-0000-1000-8000-00805f9b34fb";
 
-RTC_PCF8563 rtc;
+RTC_PCF8563 rtc_pcf8563;
 LSM6DS3 myIMU(I2C_MODE, IMU_I2C_ADDRESS);  // I2C device address 0x6A
 SPIFlash flash(7);
+static s_flash_header_t flash_header;
+static uint32_t flash_max_page = 0;
+static uint32_t flash_max_capacity = 0;
+static s_flash_header_v2_t flash_header_v2;
+static s_imu_data_t imu_data;
 
 static void __blinky(long blinky_ms);
 static s_imu_data_t *__updateAccelerometer(void);
+static void __print_buffer(uint8_t *buffer, uint32_t len);
+
+static int __write_imu_data_to_flash_v2(void) {
+#if 0
+  Serial.println("writing data: ");
+  Serial.print("Address: ");
+  Serial.print(flash_header_v2.write_addr);
+  Serial.print(", Size: ");
+  Serial.println(sizeof(s_imu_data_t));
+  __print_buffer((uint8_t *)&imu_data, sizeof(s_imu_data_t));
+#endif
+
+  if (flash.writeByteArray(flash_header_v2.write_addr, (uint8_t *)&imu_data, sizeof(s_imu_data_t))) {
+#if 0
+    Serial.println("Flash write success!");
+#endif
+    flash_header_v2.write_addr += sizeof(s_imu_data_t);
+    if (flash_header_v2.write_addr > flash_max_capacity) {
+      flash_header_v2.write_addr = 4096;
+      Serial.println("Flash is full!");
+    }
+  } else {
+    Serial.println("Flash write failed once!");
+    // if (flash.eraseSector(flash_header_v2.write_addr)) {
+    //   if (flash.writeByteArray(flash_header_v2.write_addr, (uint8_t *)&imu_data, sizeof(s_imu_data_t))) {
+    //     flash_header_v2.write_addr += sizeof(s_imu_data_t);
+    //   }
+    // }
+  }
+
+#if 0
+  uint8_t tmp_buffer[256] = { 0 };
+  if (flash.readByteArray(flash_header_v2.write_addr - sizeof(s_imu_data_t), (uint8_t *)tmp_buffer, sizeof(s_imu_data_t))) {
+    Serial.println("Reading wrote data: ");
+    __print_buffer(tmp_buffer, sizeof(s_imu_data_t));
+  } else {
+    Serial.println("Flash read failed!");
+  }
+#endif
+
+  flash_header_v2.count += 1;
+
+  if (!flash.writeByteArray(0, (uint8_t *)&flash_header_v2, sizeof(s_flash_header_v2_t))) {
+    if (flash.eraseSector(0)) {
+      flash.writeByteArray(0, (uint8_t *)&flash_header_v2, sizeof(s_flash_header_v2_t));
+    }
+  }
+}
+
+static int __flash_header_v2_init(void) {
+  int ret = 0;
+  if (flash.readByteArray(0, (uint8_t *)&flash_header_v2, sizeof(s_flash_header_v2_t))) {
+    Serial.println("Flash magic (V2) match found");
+    Serial.print("Flash header (V2) count: ");
+    Serial.println(flash_header_v2.count);
+    Serial.print("Flash header (V2) write_addr: ");
+    Serial.println(flash_header_v2.write_addr);
+    Serial.print("Flash header (V2) read_addr: ");
+    Serial.println(flash_header_v2.read_addr);
+  }
+
+  if (FLASH_MAGIC_BYTES != flash_header_v2.magic) {
+    flash_header_v2.magic = FLASH_MAGIC_BYTES;
+    flash_header_v2.count = 0;
+    flash_header_v2.write_addr = 4096;
+  }
+
+  return ret;
+}
 
 void setup() {
   pinMode(TEMP_POWER, OUTPUT);   // initialize the built-in LED pin to indicate when a central is connected
   pinMode(LED_BUILTIN, OUTPUT);  // initialize the built-in LED pin to indicate when a central is connected
 
   digitalWrite(TEMP_POWER, HIGH);
-  Serial.begin(115200);
+  Serial.begin(250000);
 
   while (!Serial) { delay(10); }
 
@@ -87,31 +168,39 @@ void setup() {
     Serial.println("Accelerometer OK!");
   }
 
-  rtc.begin();
-  if (rtc.isrunning()) {
+  rtc_pcf8563.begin();
+  if (rtc_pcf8563.isrunning()) {
     Serial.println("RTC is running.");
   } else {
     Serial.println("RTC is NOT running!");
-    // rtc.adjust(DateTime(__DATE__, __TIME__));
+    // rtc_pcf8563.adjust(DateTime(__DATE__, __TIME__));
   }
 
-  rtc.adjust(DateTime(2023, 1, 1, 0, 0, 0));
+  rtc_pcf8563.adjust(DateTime(2023, 1, 1, 0, 0, 0));
 
   if (flash.begin()) {
-
     Serial.println("Flash is running.");
+
+    flash.eraseChip();
+
     Serial.print("flash.getCapacity: ");
-    Serial.println(flash.getCapacity());
+    flash_max_capacity = flash.getCapacity();
+    Serial.println(flash_max_capacity);
 
+    flash_max_page = flash.getMaxPage();
     Serial.print("flash.getMaxPage: ");
-    Serial.println(flash.getMaxPage());
+    Serial.println(flash_max_page);
 
+    __flash_header_v2_init();
+
+#if 0
     flash.readByteArray(0, (uint8_t *)&flash_header, sizeof(s_flash_header_t), 0);
     if (FLASH_MAGIC_BYTES != flash_header.magic) {
       flash_header.addr = 0;
       flash_header.magic = 0;
-      flash_header.page = 16;
-      flash_header.sector = 1;
+      flash_header.page = 16;   // each page size 256 Bytes
+      flash_header.sector = 1;  // each sector size 4096 Bytes
+      flash_header.count = 0;
       // flash.eraseChip();
     }
 
@@ -121,6 +210,7 @@ void setup() {
     Serial.println(flash_header.page);
     Serial.print("flash-header-addr: ");
     Serial.println(flash_header.addr);
+#endif
   } else {
     Serial.println("Flash is not running!");
   }
@@ -129,24 +219,32 @@ void setup() {
 
 void loop() {
   digitalWrite(LED_BUILTIN, 1);
-#if 1
-  // s_imu_data_t __updateAccelerometer();
+  s_imu_data_t *tmp_imu_data = __updateAccelerometer();
+  __write_imu_data_to_flash_v2();
 
-  // DateTime now = rtc.now();
-  // char buf[100];
-  // strncpy(buf, "DD.MM.YYYY hh:mm:ss", 100);
-  // Serial.println(now.toString(buf));
-
-  // uint32_t epoch32 = now.unixtime();
-  // Serial.print("epoch time now: ");
-  // Serial.println(epoch32);
-
-  // DateTime converted_time(epoch32);
-  // strncpy(buf, "converted -> DD.MM.YYYY hh:mm:ss", 100);
-  // Serial.println(converted_time.toString(buf));
-
+#if 0
+  __write_data_to_flash(tmp_imu_data);
+  __update_flash_header();
 #endif
 
+  DateTime now = rtc_pcf8563.now();
+#if 0
+  char buf[100];
+  strncpy(buf, "DD.MM.YYYY hh:mm:ss", 100);
+  Serial.println(now.toString(buf));
+#endif
+
+  uint32_t epoch32 = now.unixtime();
+  // Serial.print("epoch time now: ");
+  Serial.println(epoch32);
+
+#if 0
+  DateTime converted_time(epoch32);
+  strncpy(buf, "converted -> DD.MM.YYYY hh:mm:ss", 100);
+  Serial.println(converted_time.toString(buf));
+#endif
+
+#if 0
   BLEDevice peripheral = BLE.available();
   if (peripheral) {
     Serial.print("Found ");
@@ -175,7 +273,6 @@ void loop() {
       peripheral.disconnect();
     }
 
-
     BLECharacteristic imu_data_char = peripheral.characteristic(cws_data_char_uuid);
     if (!imu_data_char) {
       Serial.println("Peripheral does not have imu characteristic!");
@@ -185,22 +282,35 @@ void loop() {
       peripheral.disconnect();
     }
 
+    BLECharacteristic imu_time_char = peripheral.characteristic(cws_time_char_uuid);
+    if (!imu_time_char) {
+      Serial.println("Peripheral does not have imu characteristic!");
+      peripheral.disconnect();
+    } else if (!imu_time_char.canRead()) {
+      Serial.println("Peripheral does not have a readable imu characteristic!");
+      peripheral.disconnect();
+    }
+
     while (peripheral.connected()) {
       s_imu_data_t *tmp_imu_data = __updateAccelerometer();
       imu_data_char.writeValue(tmp_imu_data, sizeof(s_imu_data_t));
+      time_t epoch_time = 0;
+      imu_time_char.readValue(&epoch_time, sizeof(time_t));
+      Serial.println(epoch_time);
+
       delay(20);
     }
 
     BLE.scanForName(ble_gateway_name);
   }
+#endif
 
-  delay(100);
+  // delay(2000);
 
   // LowPower.sleep(2000);
   // myPowSave.
 }
 
-s_imu_data_t imu_data;
 static s_imu_data_t *__updateAccelerometer(void) {
   memset(&imu_data, 0, sizeof(s_imu_data_t));
 
@@ -228,31 +338,56 @@ static s_imu_data_t *__updateAccelerometer(void) {
   Serial.println(imu_data.gyro_val_z / 100.0);
 #endif
 
-  DateTime now = rtc.now();
+  DateTime now = rtc_pcf8563.now();
   imu_data.epoch_time = now.unixtime();
   // Serial.print("epoch time: ");
-  Serial.println(imu_data.epoch_time);
+  // Serial.println(imu_data.epoch_time);
 
   return &imu_data;
-
-  // __write_data_to_flash(&imu_data);
-  // __update_flash_header();
 }
 
-static void __print_buffer(uint8_t *buffer, uint32_t len) {
-  for (int i = 0; i < (len % 16) + 1; i++) {
+static void __print_buffer(uint8_t *data_buffer, uint32_t len) {
+  bool break_val = 0;
+  for (int i = 0; i < 16; i++) {
     for (int j = 0; j < 16; j++) {
-      if ((i * 16 + j) < len) {
-        if (j == 15) {
-          Serial.println(buffer[i * 16 + j], 10);
-        } else {
-          Serial.print(buffer[i * 16 + j], 10);
-          Serial.print(" ");
-        }
+#if 0
+      if (i * 16 + j < len) {
+      // Serial.println("");
+      Serial.print("Size: ");
+      Serial.print(len);
+      Serial.print(", Pointer: ");
+      Serial.print(i * 16 + j);
+      Serial.print(", Value: ");
+        Serial.println(data_buffer[i * 16 + j]);
       } else {
+        break_val = 1;
         break;
       }
+
+      if (break_val) break;
+#endif
+#if 1
+      if (i * 16 + j < len) {
+        char prnt_buffer[8];
+        uint8_t x = data_buffer[i * 16 + j];
+        if (x < 10) Serial.print("0");
+        if (x < 100) Serial.print("0");
+
+        if (j < 15) {
+          snprintf(prnt_buffer, sizeof(prnt_buffer), "%d, ", x);
+          Serial.print(prnt_buffer);
+        } else {
+          snprintf(prnt_buffer, sizeof(prnt_buffer), "%d", x);
+          Serial.println(prnt_buffer);
+        }
+      } else {
+        break_val = 1;
+        break;
+      }
+#endif
     }
+
+    if (break_val) break;
   }
   Serial.println("");
 }
@@ -263,12 +398,12 @@ static int __read_sector(uint32_t sector_number, uint8_t *sector_buffer) {
   int ret = 0;
   Serial.print("Sector number: ");
   Serial.println(sector_number);
-
   Serial.print("Page number: ");
   Serial.println(sector_number * 16);
+
   if (flash.readByteArray(sector_number * 16, sector_buffer, 4096)) {
     Serial.println("Flash read Success");
-    __print_buffer(sector_buffer, 4096);
+    __print_buffer(sector_buffer, flash_header.addr);
     ret = 1;
   } else {
     Serial.println("Flash read failed");
@@ -278,15 +413,22 @@ static int __read_sector(uint32_t sector_number, uint8_t *sector_buffer) {
 }
 
 
-
 static int __write_data_to_flash(s_imu_data_t *__imu_data) {
-  if (__read_sector(0, imu_sector_buffer)) {
-    flash.eraseSector(flash_header.sector);
-    memcpy(imu_sector_buffer + ((flash_header.page % 16) + flash_header.addr), (uint8_t *)__imu_data, sizeof(s_imu_data_t));
-    if (flash.writeByteArray(flash_header.page, imu_sector_buffer, sizeof(imu_sector_buffer))) {
-      Serial.println("Flash write success");
-      __print_buffer(imu_sector_buffer, 4096);
+  if (__read_sector(flash_header.sector, imu_sector_buffer)) {
+    if (flash.eraseSector(flash_header.sector)) {
+      Serial.println("Flash erase sector success");
+      memcpy(imu_sector_buffer + ((flash_header.page % 16) + flash_header.addr), (uint8_t *)__imu_data, sizeof(s_imu_data_t));
+      if (flash.writeByteArray(flash_header.page, imu_sector_buffer, sizeof(imu_sector_buffer))) {
+        Serial.println("Flash write success");
+        __print_buffer(imu_sector_buffer, flash_header.addr + sizeof(s_imu_data_t));
+      } else {
+        Serial.println("Flash write failed!");
+      }
+    } else {
+      Serial.println("Flash erase failed!");
     }
+  } else {
+    Serial.println("Sector read failed!");
   }
 #if 0
   if (__imu_data) {
@@ -325,29 +467,45 @@ static int __write_data_to_flash(s_imu_data_t *__imu_data) {
 }
 
 static int __update_flash_header(void) {
-  // flash_header.addr
-
+  Serial.print("flash_header.sector: ");
+  Serial.println(flash_header.sector);
   Serial.print("flash_header.page: ");
   Serial.println(flash_header.page);
   Serial.print("flash_header.addr: ");
   Serial.println(flash_header.addr);
+  Serial.print("flash_header.count: ");
+  Serial.println(flash_header.count);
 
   if (flash_header.addr + sizeof(s_imu_data_t) > FLASH_PAGE_SIZE_BYTES) {
-    if (flash_header.page < flash.getMaxPage()) {
+    if (flash_header.page < flash_max_page) {
       flash_header.page += 1;
-      if (flash_header.page % 16) {
-        flash_header.sector = flash_header.page % 16;
-      }
+      flash_header.sector = flash_header.page / 16;
+
       flash_header.addr = 0;
       flash_header.count += 1;
     } else {
       Serial.println("Warnnig: Memory is full!");
       flash.eraseSector(0);
+      flash_header.sector = 1;
+      flash_header.page = 16;
+      flash_header.addr = 0;
+      flash_header.magic = FLASH_MAGIC_BYTES;
       flash.writeByteArray(0, (uint8_t *)&flash_header, sizeof(s_flash_header_t));
     }
   } else {
     flash_header.count += 1;
     flash_header.addr += sizeof(s_imu_data_t);
+  }
+
+  if (flash.eraseSector(0)) {
+    flash_header.magic = FLASH_MAGIC_BYTES;
+    if (flash.writeByteArray(0, (uint8_t *)&flash_header, sizeof(s_flash_header_t))) {
+      Serial.println("Flash header updated");
+    } else {
+      Serial.println("Flash header write failed!");
+    }
+  } else {
+    Serial.println("Flash header erase sector failed!");
   }
 }
 
