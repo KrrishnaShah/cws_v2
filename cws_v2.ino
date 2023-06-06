@@ -31,6 +31,8 @@ using namespace mbed;
 using namespace rtos;
 using namespace std::chrono_literals;
 
+#define USE_FLASH 0
+
 #define DEVICE_ID 4
 #define TEMP_POWER D3
 #define IMU_I2C_ADDRESS 0x6A
@@ -57,9 +59,12 @@ typedef struct s_imu_data {
   int gyro_val_z;
 } s_imu_data_t;
 
-static uint32_t imu_data_buffer_idx = 0;
-static s_imu_data_t imu_data_buffer[2048] = {0};
 
+#if (0 == USE_FLASH)
+#define RING_BUFFER_SIZE 2048
+static uint32_t imu_data_ring_buffer_idx = 0;
+static s_imu_data_t imu_data_ring_buffer[RING_BUFFER_SIZE] = { 0 };
+#else
 typedef struct s_flash_header_v2 {
   uint32_t magic;
   uint32_t count;
@@ -67,14 +72,13 @@ typedef struct s_flash_header_v2 {
   uint32_t read_addr;
 } s_flash_header_v2_t;
 
+SPIFlash flash(7);
+#endif
 
 static const char *ble_gateway_name = "cws-gateway";
 static const char *cws_data_char_uuid = "e202";
-// static const char *cws_data_char_uuid = "0000e202-0000-1000-8000-00805f9b34fb";
 static const char *cws_time_char_uuid = "e203";
-// static const char *cws_time_char_uuid = "0000e203-0000-1000-8000-00805f9b34fb";
 
-SPIFlash flash(7);
 RTC_PCF8563 rtc_pcf8563;
 LSM6DS3 myIMU(I2C_MODE, IMU_I2C_ADDRESS);  // I2C device address 0x6A
 
@@ -99,6 +103,7 @@ static int __spi_flash_read(uint32_t addr, uint8_t *data, uint32_t len, uint32_t
 static void ble_thread_process(void);
 static void sensor_thread_process(void);
 
+#if (1 == USE_FLASH)
 static int __flash_write() {
   int ret = 0;
   Serial.print("Flash Write address: ");
@@ -174,9 +179,7 @@ static int __write_imu_data_to_flash_v2(void) {
       }
     }
   }
-
   flash_header_v2.count += 1;
-
   // if (!flash.writeByteArray(0, (uint8_t *)&flash_header_v2, sizeof(s_flash_header_v2_t))) {
   if (!__spi_flash_write(0, (uint8_t *)&flash_header_v2, sizeof(s_flash_header_v2_t))) {
     if (flash.eraseSector(0)) {
@@ -209,6 +212,7 @@ static int __flash_header_v2_init(void) {
 
   return ret;
 }
+#endif
 
 void setup() {
   pinMode(TEMP_POWER, OUTPUT);   // initialize the built-in LED pin to indicate when a central is connected
@@ -217,7 +221,7 @@ void setup() {
   digitalWrite(TEMP_POWER, HIGH);
   Serial.begin(250000);
 
-  memset(imu_data_buffer, 0, sizeof(imu_data_buffer));
+  memset(imu_data_ring_buffer, 0, sizeof(imu_data_ring_buffer));
   while (!Serial) { delay(10); }
 
 
@@ -237,6 +241,7 @@ void setup() {
 
   rtc_pcf8563.adjust(DateTime(2023, 1, 1, 0, 0, 0));
 
+#if (1 == USE_FLASH)
   if (flash.begin()) {
     Serial.println("Flash is running.");
 
@@ -256,11 +261,13 @@ void setup() {
   } else {
     Serial.println("Flash is not running!");
   }
+#endif
 
   sensor_thread.start(sensor_thread_process);
   ble_thread.start(ble_thread_process);
 }
 
+#if (1 == USE_FLASH)
 static void send_to_ble(void) {
   BLE.begin();
   BLE.scanForName(ble_gateway_name);
@@ -346,12 +353,13 @@ static void send_to_ble(void) {
     }
   }
 }
+#endif
 
 static void ble_thread_process(void) {
   Serial.println("BLE thread is running");
   ThisThread::sleep_for(5s);
   for (;;) {
-    #if 0
+#if (1 == USE_FLASH)
     if (flash_header_v2.read_addr + (BLE_MTU_SIZE * 5) < flash_header_v2.write_addr) {
       DateTime now = rtc_pcf8563.now();
       imu_data.epoch_time = now.unixtime();
@@ -367,27 +375,60 @@ static void ble_thread_process(void) {
     } else {
       ThisThread::sleep_for(100ms);
     }
-    #else
-    if (imu_data_buffer_idx >= )
-    #endif
+#else
+    if (imu_data_ring_buffer_idx >=)
+#endif
   }
 }
+
+#if (0 == USE_FLASH)
+static uint32_t read_pointer = 0;
+static uint32_t write_pointer = 0;
+static void __ring_buffer_write(void) {
+  write_pointer = (write_pointer == RING_BUFFER_SIZE) ? 0 : write_pointer;
+  memcpy(&imu_data_ring_buffer[write_pointer], (uint8_t *)&imu_data, sizeof(s_imu_data_t));
+  write_pointer += 1;
+}
+
+static uint32_t __ring_buffer_read(uint32_t *data, uint32_t count) {
+  uint32_t ret = 0;
+  uint32_t data_size = 0;
+
+  if (read_pointer != write_pointer) {
+    if (read_pointer < write_pointer) {
+      data_size = write_pointer - read_pointer;
+    } else {
+      data_size = (write_pointer + RING_BUFFER_SIZE) - read_pointer;
+    }
+  }
+
+  if (data_size && count) {
+    if (data_size > count) {
+      memcpy(data, (uint8_t *)&imu_data_ring_buffer[read_pointer], count * sizeof(s_imu_data_t));
+      ret = count;
+    } else {
+      memcpy(data, (uint8_t *)&imu_data_ring_buffer[read_pointer], data_size * sizeof(s_imu_data_t));
+    }
+  }
+
+  return ret;
+}
+#endif
 
 static void sensor_thread_process(void) {
   Serial.println("Sensor thread is running");
   ThisThread::sleep_for(5s);
   for (;;) {
     __updateAccelerometer();
-    #if 0
+#if (1 == USE_FLASH)
     __write_imu_data_to_flash_v2();
-    #else
-    memcpy(&imu_data_buffer[imu_data_buffer_idx], (uint8_t *)&imu_data, sizeof(s_imu_data_t));
-    imu_data_buffer_idx += 1;
-    if (imu_data_buffer_idx > sizeof(imu_data_buffer)/sizeof(s_imu_data_t))
-    {
-      imu_data_buffer_idx = 0;
+#else
+    memcpy(&imu_data_ring_buffer[imu_data_ring_buffer_idx], (uint8_t *)&imu_data, sizeof(s_imu_data_t));
+    imu_data_ring_buffer_idx += 1;
+    if (imu_data_ring_buffer_idx > sizeof(imu_data_ring_buffer) / sizeof(s_imu_data_t)) {
+      imu_data_ring_buffer_idx = 0;
     }
-    #endif
+#endif
 
     if (sensor_thread_hold) {
       Serial.println("Sensor thread is for hold...");
