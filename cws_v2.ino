@@ -42,6 +42,8 @@ using namespace std::chrono_literals;
 #define DEVICE_ID
 
 
+
+
 typedef struct s_imu_data {
   uint32_t sn;
   uint32_t epoch_time;
@@ -54,6 +56,9 @@ typedef struct s_imu_data {
   int gyro_val_y;
   int gyro_val_z;
 } s_imu_data_t;
+
+static uint32_t imu_data_buffer_idx = 0;
+static s_imu_data_t imu_data_buffer[2048] = {0};
 
 typedef struct s_flash_header_v2 {
   uint32_t magic;
@@ -79,13 +84,18 @@ static s_flash_header_v2_t flash_header_v2;
 static s_imu_data_t imu_data;
 
 static Thread ble_thread;
+// static Thread sensor_thread(osPriorityHigh);
 static Thread sensor_thread;
+static Mutex spi_flash_mutex;
 
 static volatile bool sensor_thread_hold = 0;
 
 static void __blinky(long blinky_ms);
-static s_imu_data_t *__updateAccelerometer(void);
+static void __updateAccelerometer(void);
 static void __print_buffer(uint8_t *buffer, uint32_t len);
+static int __spi_flash_write(uint32_t addr, uint8_t *data, uint32_t len);
+static int __spi_flash_read(uint32_t addr, uint8_t *data, uint32_t len, uint32_t retry);
+
 static void ble_thread_process(void);
 static void sensor_thread_process(void);
 
@@ -95,7 +105,8 @@ static int __flash_write() {
   Serial.println(flash_header_v2.write_addr);
   __print_buffer((uint8_t *)&imu_data, sizeof(s_imu_data_t));
 
-  if (flash.writeByteArray(flash_header_v2.write_addr, (uint8_t *)&imu_data, sizeof(s_imu_data_t))) {
+  // if (flash.writeByteArray(flash_header_v2.write_addr, (uint8_t *)&imu_data, sizeof(s_imu_data_t))) {
+  if (__spi_flash_write(flash_header_v2.write_addr, (uint8_t *)&imu_data, sizeof(s_imu_data_t))) {
     Serial.println("Flash write success");
     ret = 1;
     flash_header_v2.write_addr += sizeof(s_imu_data_t);
@@ -112,7 +123,8 @@ static int __flash_write() {
   Serial.print("Flash Read address: ");
   Serial.println(flash_header_v2.write_addr - sizeof(s_imu_data_t));
 
-  if (!flash.readByteArray(flash_header_v2.write_addr - sizeof(s_imu_data_t), tmp_data, 32)) {
+  // if (!flash.readByteArray(flash_header_v2.write_addr - sizeof(s_imu_data_t), tmp_data, 32)) {
+  if (!__spi_flash_read(flash_header_v2.write_addr - sizeof(s_imu_data_t), tmp_data, sizeof(tmp_data), 1)) {
     Serial.println("Read failed!");
   } else {
     // flash_header_v2.read_addr += sizeof(s_imu_data_t);
@@ -130,6 +142,10 @@ static int __flash_write() {
     Serial.println("Wrote data: len - 32");
     __print_buffer(tmp_data, 32);
     ThisThread::sleep_for(30s);
+    while (1) {
+      Serial.print(".");
+      ThisThread::sleep_for(1s);
+    }
   }
 #endif
 
@@ -161,9 +177,11 @@ static int __write_imu_data_to_flash_v2(void) {
 
   flash_header_v2.count += 1;
 
-  if (!flash.writeByteArray(0, (uint8_t *)&flash_header_v2, sizeof(s_flash_header_v2_t))) {
+  // if (!flash.writeByteArray(0, (uint8_t *)&flash_header_v2, sizeof(s_flash_header_v2_t))) {
+  if (!__spi_flash_write(0, (uint8_t *)&flash_header_v2, sizeof(s_flash_header_v2_t))) {
     if (flash.eraseSector(0)) {
-      flash.writeByteArray(0, (uint8_t *)&flash_header_v2, sizeof(s_flash_header_v2_t));
+      __spi_flash_write(0, (uint8_t *)&flash_header_v2, sizeof(s_flash_header_v2_t));
+      // flash.writeByteArray(0, (uint8_t *)&flash_header_v2, sizeof(s_flash_header_v2_t));
     }
   }
 }
@@ -199,7 +217,9 @@ void setup() {
   digitalWrite(TEMP_POWER, HIGH);
   Serial.begin(250000);
 
+  memset(imu_data_buffer, 0, sizeof(imu_data_buffer));
   while (!Serial) { delay(10); }
+
 
   if (myIMU.begin() != 0) {
     Serial.println("Accelerometer error");
@@ -277,18 +297,21 @@ static void send_to_ble(void) {
 
         uint8_t ble_buffer[BLE_MTU_SIZE];
 
-        sensor_thread_hold = 1;
+        // sensor_thread_hold = 1;
 
-        while ((flash_header_v2.read_addr + (BLE_MTU_SIZE * 10)) < flash_header_v2.write_addr) {
-          Serial.print("Read Address: ");
-          Serial.println(flash_header_v2.read_addr);
-
+        while ((flash_header_v2.read_addr + BLE_MTU_SIZE) < flash_header_v2.write_addr) {
           uint32_t byte_len_diff = (flash_header_v2.write_addr - flash_header_v2.read_addr);
-          uint32_t read_len = sizeof(s_imu_data_t); //  byte_len_diff > BLE_MTU_SIZE ? BLE_MTU_SIZE : byte_len_diff;
-          Serial.print("real_len: ");
+          uint32_t read_len = byte_len_diff > BLE_MTU_SIZE ? BLE_MTU_SIZE : byte_len_diff;
+
+          Serial.print("BLE-Read Address: ");
+          Serial.print(flash_header_v2.read_addr);
+          Serial.print(", diff: ");
+          Serial.println(byte_len_diff);
+          Serial.print(", real_len: ");
           Serial.println(read_len);
 
-          if (flash.readByteArray(flash_header_v2.read_addr, ble_buffer, read_len)) {
+          // if (flash.readByteArray(flash_header_v2.read_addr, ble_buffer, read_len)) {
+          if (__spi_flash_read(flash_header_v2.read_addr, ble_buffer, read_len, 2)) {
             Serial.println("Flash read buffer: ");
             __print_buffer(ble_buffer, read_len);
             if (imu_data_char.writeValue(ble_buffer, read_len)) {
@@ -300,8 +323,8 @@ static void send_to_ble(void) {
               }
             }
           }
+          ThisThread::sleep_for(5ms);
         }
-
 
         sensor_thread_hold = 0;
 
@@ -328,7 +351,8 @@ static void ble_thread_process(void) {
   Serial.println("BLE thread is running");
   ThisThread::sleep_for(5s);
   for (;;) {
-    if (flash_header_v2.read_addr + (32 * 7 * 10) < flash_header_v2.write_addr) {
+    #if 0
+    if (flash_header_v2.read_addr + (BLE_MTU_SIZE * 5) < flash_header_v2.write_addr) {
       DateTime now = rtc_pcf8563.now();
       imu_data.epoch_time = now.unixtime();
       Serial.print("epoch before ble: ");
@@ -343,6 +367,9 @@ static void ble_thread_process(void) {
     } else {
       ThisThread::sleep_for(100ms);
     }
+    #else
+    if (imu_data_buffer_idx >= )
+    #endif
   }
 }
 
@@ -350,12 +377,23 @@ static void sensor_thread_process(void) {
   Serial.println("Sensor thread is running");
   ThisThread::sleep_for(5s);
   for (;;) {
-    s_imu_data_t *tmp_imu_data = __updateAccelerometer();
+    __updateAccelerometer();
+    #if 0
     __write_imu_data_to_flash_v2();
-    if (sensor_thread_hold) {
-      ThisThread::sleep_for(10s);
+    #else
+    memcpy(&imu_data_buffer[imu_data_buffer_idx], (uint8_t *)&imu_data, sizeof(s_imu_data_t));
+    imu_data_buffer_idx += 1;
+    if (imu_data_buffer_idx > sizeof(imu_data_buffer)/sizeof(s_imu_data_t))
+    {
+      imu_data_buffer_idx = 0;
     }
-    // ThisThread::sleep_for(20ms);
+    #endif
+
+    if (sensor_thread_hold) {
+      Serial.println("Sensor thread is for hold...");
+      // ThisThread::sleep_for(10000ms);
+    }
+    // ThisThread::sleep_for(1000ms);
   }
 }
 
@@ -364,7 +402,7 @@ void loop() {
   delay(2000);
 }
 
-static s_imu_data_t *__updateAccelerometer(void) {
+static void __updateAccelerometer(void) {
   imu_data.acc_val_x = (int)(myIMU.readFloatAccelX() * 100);
   imu_data.acc_val_y = (int)(myIMU.readFloatAccelY() * 100);
   imu_data.acc_val_z = (int)(myIMU.readFloatAccelZ() * 100);
@@ -397,8 +435,6 @@ static s_imu_data_t *__updateAccelerometer(void) {
   if (now.year() < 2023) {
     send_to_ble();
   }
-
-  return &imu_data;
 }
 
 static void __print_buffer(uint8_t *data_buffer, uint32_t len) {
@@ -427,6 +463,43 @@ static void __print_buffer(uint8_t *data_buffer, uint32_t len) {
     if (break_val) break;
   }
   Serial.println("");
+}
+
+static int __spi_flash_read(uint32_t addr, uint8_t *data, uint32_t len, uint32_t retry) {
+  int ret = 0;
+  if (data && len) {
+    while (retry--) {
+      if (spi_flash_mutex.trylock_for(10ms)) {
+        Serial.println("Read lock");
+        if (flash.readByteArray(addr, data, len)) {
+          ret = 1;
+        }
+        spi_flash_mutex.unlock();
+        Serial.println("Read unlock");
+        if (ret) {
+          break;
+        }
+        ThisThread::sleep_for(2ms);
+      } else {
+        Serial.println("Read lock failed!");
+      }
+    }
+  }
+  return ret;
+}
+
+static int __spi_flash_write(uint32_t addr, uint8_t *data, uint32_t len) {
+  int ret = 0;
+  if (data && len) {
+    Serial.println("Write lock");
+    spi_flash_mutex.lock();
+    if (flash.writeByteArray(addr, data, len)) {
+      ret = 1;
+    }
+    spi_flash_mutex.unlock();
+    Serial.println("Write unlock");
+  }
+  return ret;
 }
 
 static void __blinky(long blinky_ms) {
