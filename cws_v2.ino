@@ -26,6 +26,7 @@
 #include <SPIMemory.h>
 #include <mbed.h>
 #include <Wire.h>
+#include <UUID.h>
 
 using namespace mbed;
 using namespace rtos;
@@ -42,9 +43,8 @@ using namespace std::chrono_literals;
 #define BLE_MTU_SIZE (32 * 7)
 
 #define DEVICE_ID
-
-
-
+const static char *device_uuid_str = "8f8a223c-04f2-11ee-be56-0242ac120002";
+static uint8_t device_uuid[16] = { 0 };
 
 typedef struct s_imu_data {
   uint32_t sn;
@@ -59,10 +59,12 @@ typedef struct s_imu_data {
   int gyro_val_z;
 } s_imu_data_t;
 
-
 #if (0 == USE_FLASH)
-#define RING_BUFFER_SIZE 2048
-static uint32_t imu_data_ring_buffer_idx = 0;
+#define RING_BUFFER_SIZE 128
+static uint32_t imu_data_count = 0;
+
+static uint32_t ring_buffer_read_pointer = 0;
+static uint32_t ring_buffer_write_pointer = 0;
 static s_imu_data_t imu_data_ring_buffer[RING_BUFFER_SIZE] = { 0 };
 #else
 typedef struct s_flash_header_v2 {
@@ -71,6 +73,10 @@ typedef struct s_flash_header_v2 {
   uint32_t write_addr;
   uint32_t read_addr;
 } s_flash_header_v2_t;
+
+static uint32_t flash_max_page = 0;
+static uint32_t flash_max_capacity = 0;
+static s_flash_header_v2_t flash_header_v2;
 
 SPIFlash flash(7);
 #endif
@@ -82,9 +88,6 @@ static const char *cws_time_char_uuid = "e203";
 RTC_PCF8563 rtc_pcf8563;
 LSM6DS3 myIMU(I2C_MODE, IMU_I2C_ADDRESS);  // I2C device address 0x6A
 
-static uint32_t flash_max_page = 0;
-static uint32_t flash_max_capacity = 0;
-static s_flash_header_v2_t flash_header_v2;
 static s_imu_data_t imu_data;
 
 static Thread ble_thread;
@@ -222,8 +225,9 @@ void setup() {
   Serial.begin(250000);
 
   memset(imu_data_ring_buffer, 0, sizeof(imu_data_ring_buffer));
-  while (!Serial) { delay(10); }
-
+  while (!Serial) {
+    delay(10);
+  }
 
   if (myIMU.begin() != 0) {
     Serial.println("Accelerometer error");
@@ -238,6 +242,11 @@ void setup() {
     Serial.println("RTC is NOT running!");
     // rtc_pcf8563.adjust(DateTime(__DATE__, __TIME__));
   }
+
+  UUID uuid(device_uuid_str);
+  uuid.setupLong(uuid.getBaseUUID(), UUID::MSB);
+  uint8_t *base_uuid = (uint8_t *)uuid.getBaseUUID();
+  memcpy(device_uuid, base_uuid, 16);
 
   rtc_pcf8563.adjust(DateTime(2023, 1, 1, 0, 0, 0));
 
@@ -257,7 +266,6 @@ void setup() {
     Serial.println(flash_max_page);
 
     __flash_header_v2_init();
-
   } else {
     Serial.println("Flash is not running!");
   }
@@ -268,7 +276,7 @@ void setup() {
 }
 
 #if (1 == USE_FLASH)
-static void send_to_ble(void) {
+static void send_to_ble_from_flash(void) {
   BLE.begin();
   BLE.scanForName(ble_gateway_name);
 
@@ -344,7 +352,103 @@ static void send_to_ble(void) {
 
         BLE.disconnect();
         Serial.println(epoch_time);
+      } else {
+        Serial.println("BLE connection failed!");
+      }
+    } else {
+      Serial.println("Failed to connect!");
+    }
+  }
+}
+#else
+static void send_to_ble_from_ring_buffer(void) {
+  BLE.begin();
+  BLE.scanForName(ble_gateway_name);
 
+  BLEDevice peripheral = BLE.available();
+  if (peripheral) {
+    BLE.stopScan();
+
+    if (peripheral.connect()) {
+      if (!peripheral.discoverAttributes()) {
+        Serial.println("Attribute discovery failed!");
+        peripheral.disconnect();
+      }
+
+      BLECharacteristic imu_data_char = peripheral.characteristic(cws_data_char_uuid);
+      if (!imu_data_char) {
+        Serial.println("Peripheral does not have imu characteristic!");
+        peripheral.disconnect();
+      } else if (!imu_data_char.canWrite()) {
+        Serial.println("Peripheral does not have a writable imu characteristic!");
+        peripheral.disconnect();
+      }
+
+      BLECharacteristic imu_time_char = peripheral.characteristic(cws_time_char_uuid);
+      if (!imu_time_char) {
+        Serial.println("Peripheral does not have imu characteristic!");
+        peripheral.disconnect();
+      } else if (!imu_time_char.canRead()) {
+        Serial.println("Peripheral does not have a readable imu characteristic!");
+        peripheral.disconnect();
+      }
+
+      if (peripheral.connected()) {
+
+        uint8_t ble_buffer[BLE_MTU_SIZE + 16];
+        uint32_t number_of_sample_available = (ring_buffer_read_pointer <= ring_buffer_write_pointer) ? (ring_buffer_write_pointer - ring_buffer_read_pointer) : (ring_buffer_write_pointer + RING_BUFFER_SIZE - ring_buffer_read_pointer);
+        Serial.print("ble: Ring buffer read_pointer: ");
+        Serial.println(ring_buffer_read_pointer);
+        Serial.print("ble: Ring buffer write_pointer: ");
+        Serial.println(ring_buffer_write_pointer);
+        Serial.print("ble: number of samples available: ");
+        Serial.println(number_of_sample_available);
+
+        memcpy(ble_buffer, device_uuid, 16);
+        uint8_t *ble_buffer_data_offset = &ble_buffer[16];
+
+        while (number_of_sample_available > 10) {
+          Serial.print("BLE-Read Address: ");
+          Serial.print(ring_buffer_read_pointer);
+
+          if (__ring_buffer_read(ble_buffer_data_offset, 7)) {
+            Serial.println("Flash read buffer: ");
+            __print_buffer(ble_buffer, (7 * sizeof(s_imu_data_t)) + 16);
+
+            if (!imu_data_char.writeValue(ble_buffer, (7 * sizeof(s_imu_data_t) + 16))) {
+              Serial.println("BLE: data write faield - once");
+              if (!imu_data_char.writeValue(ble_buffer, (7 * sizeof(s_imu_data_t) + 16))) {
+                Serial.println("BLE: data write faield - twice");
+              }
+            }
+
+            if (!peripheral.connected()) {
+              break;
+            }
+          }
+
+          number_of_sample_available = (ring_buffer_read_pointer <= ring_buffer_write_pointer) ? (ring_buffer_write_pointer - ring_buffer_read_pointer) : (ring_buffer_write_pointer + RING_BUFFER_SIZE - ring_buffer_read_pointer);
+          Serial.print("BLE: Ring buffer read_pointer: ");
+          Serial.println(ring_buffer_read_pointer);
+          Serial.print("BLE: Ring buffer write_pointer: ");
+          Serial.println(ring_buffer_write_pointer);
+          Serial.print("BLE: number of samples available: ");
+          Serial.println(number_of_sample_available);
+
+          ThisThread::sleep_for(1ms);
+        }
+
+        sensor_thread_hold = 0;
+
+        time_t epoch_time = 0;
+        if (imu_time_char.readValue(&epoch_time, sizeof(time_t))) {
+          rtc_pcf8563.adjust(DateTime(epoch_time));
+        } else {
+          Serial.println("Ble time read failed!");
+        }
+
+        BLE.disconnect();
+        Serial.println(epoch_time);
       } else {
         Serial.println("BLE connection failed!");
       }
@@ -366,7 +470,7 @@ static void ble_thread_process(void) {
       Serial.print("epoch before ble: ");
       Serial.println(imu_data.epoch_time);
 
-      send_to_ble();
+      send_to_ble_from_flash();
 
       now = rtc_pcf8563.now();
       imu_data.epoch_time = now.unixtime();
@@ -376,40 +480,56 @@ static void ble_thread_process(void) {
       ThisThread::sleep_for(100ms);
     }
 #else
-    if (imu_data_ring_buffer_idx >=)
+    uint32_t number_of_sample_available = (ring_buffer_read_pointer <= ring_buffer_write_pointer) ? (ring_buffer_write_pointer - ring_buffer_read_pointer) : (ring_buffer_write_pointer + RING_BUFFER_SIZE - ring_buffer_read_pointer);
+
+    Serial.print("Ring buffer read_pointer: ");
+    Serial.println(ring_buffer_read_pointer);
+    Serial.print("Ring buffer write_pointer: ");
+    Serial.println(ring_buffer_write_pointer);
+    Serial.print("number of samples available: ");
+    Serial.println(number_of_sample_available);
+
+    if (number_of_sample_available > 50) {
+      send_to_ble_from_ring_buffer();
+    }
+
+    ThisThread::sleep_for(100);
+    // if (imu_data_ring_buffer_idx >=)
 #endif
   }
 }
 
 #if (0 == USE_FLASH)
-static uint32_t read_pointer = 0;
-static uint32_t write_pointer = 0;
 static void __ring_buffer_write(void) {
-  write_pointer = (write_pointer == RING_BUFFER_SIZE) ? 0 : write_pointer;
-  memcpy(&imu_data_ring_buffer[write_pointer], (uint8_t *)&imu_data, sizeof(s_imu_data_t));
-  write_pointer += 1;
+  imu_data.sn = imu_data_count;
+  ring_buffer_write_pointer = (ring_buffer_write_pointer == RING_BUFFER_SIZE) ? 0 : ring_buffer_write_pointer;
+  memcpy(&imu_data_ring_buffer[ring_buffer_write_pointer], (uint8_t *)&imu_data, sizeof(s_imu_data_t));
+  ring_buffer_write_pointer += 1;
+  imu_data_count += 1;
 }
 
-static uint32_t __ring_buffer_read(uint32_t *data, uint32_t count) {
+static uint32_t __ring_buffer_read(uint8_t *data, uint32_t count) {
   uint32_t ret = 0;
   uint32_t data_size = 0;
 
-  if (read_pointer != write_pointer) {
-    if (read_pointer < write_pointer) {
-      data_size = write_pointer - read_pointer;
+  if (ring_buffer_read_pointer != ring_buffer_write_pointer) {
+    if (ring_buffer_read_pointer < ring_buffer_write_pointer) {
+      data_size = ring_buffer_write_pointer - ring_buffer_read_pointer;
     } else {
-      data_size = (write_pointer + RING_BUFFER_SIZE) - read_pointer;
+      data_size = (ring_buffer_write_pointer + RING_BUFFER_SIZE) - ring_buffer_read_pointer;
     }
   }
 
   if (data_size && count) {
     if (data_size > count) {
-      memcpy(data, (uint8_t *)&imu_data_ring_buffer[read_pointer], count * sizeof(s_imu_data_t));
+      memcpy(data, (uint8_t *)&imu_data_ring_buffer[ring_buffer_read_pointer], count * sizeof(s_imu_data_t));
       ret = count;
     } else {
-      memcpy(data, (uint8_t *)&imu_data_ring_buffer[read_pointer], data_size * sizeof(s_imu_data_t));
+      memcpy(data, (uint8_t *)&imu_data_ring_buffer[ring_buffer_read_pointer], data_size * sizeof(s_imu_data_t));
     }
   }
+
+  ring_buffer_read_pointer += ret;
 
   return ret;
 }
@@ -423,11 +543,10 @@ static void sensor_thread_process(void) {
 #if (1 == USE_FLASH)
     __write_imu_data_to_flash_v2();
 #else
-    memcpy(&imu_data_ring_buffer[imu_data_ring_buffer_idx], (uint8_t *)&imu_data, sizeof(s_imu_data_t));
-    imu_data_ring_buffer_idx += 1;
-    if (imu_data_ring_buffer_idx > sizeof(imu_data_ring_buffer) / sizeof(s_imu_data_t)) {
-      imu_data_ring_buffer_idx = 0;
-    }
+    __ring_buffer_write();
+    __print_buffer((uint8_t *)&imu_data, sizeof(s_imu_data_t));
+    // ThisThread::sleep_for(85ms);
+    ThisThread::sleep_for(850ms);
 #endif
 
     if (sensor_thread_hold) {
@@ -470,11 +589,19 @@ static void __updateAccelerometer(void) {
 
   DateTime now = rtc_pcf8563.now();
   imu_data.epoch_time = now.unixtime();
+#if (1 == USE_FLASH)
   Serial.print(flash_header_v2.count);
+#else
+  Serial.print(imu_data_count);
+#endif
   Serial.print(": ");
   Serial.println(imu_data.epoch_time);
   if (now.year() < 2023) {
-    send_to_ble();
+#if (1 == USE_FLASH)
+    send_to_ble_from_flash();
+#else
+
+#endif
   }
 }
 
@@ -501,11 +628,13 @@ static void __print_buffer(uint8_t *data_buffer, uint32_t len) {
       }
     }
 
-    if (break_val) break;
+    if (break_val)
+      break;
   }
   Serial.println("");
 }
 
+#if (1 == USE_FLASH)
 static int __spi_flash_read(uint32_t addr, uint8_t *data, uint32_t len, uint32_t retry) {
   int ret = 0;
   if (data && len) {
@@ -542,6 +671,7 @@ static int __spi_flash_write(uint32_t addr, uint8_t *data, uint32_t len) {
   }
   return ret;
 }
+#endif
 
 static void __blinky(long blinky_ms) {
   static int _on;
