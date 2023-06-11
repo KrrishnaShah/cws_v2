@@ -37,13 +37,16 @@ typedef struct s_imu_data {
   uint32_t sn;
   uint32_t epoch_time;
 
-  int acc_val_x;
-  int acc_val_y;
-  int acc_val_z;
+  int16_t acc_val_x;
+  int16_t acc_val_y;
+  int16_t acc_val_z;
 
-  int gyro_val_x;
-  int gyro_val_y;
-  int gyro_val_z;
+  int16_t gyro_val_x;
+  int16_t gyro_val_y;
+  int16_t gyro_val_z;
+
+  uint16_t pedometer;
+  uint16_t dummy;
 } s_imu_data_t;
 
 
@@ -52,7 +55,7 @@ typedef struct s_imu_data {
 #define TEMP_POWER D3
 #define IMU_I2C_ADDRESS 0x6A
 
-#define BLE_MTU_SIZE (32 * 7)
+#define BLE_MTU_SIZE (sizeof(s_imu_data_t) * 7)
 #define DEVICE_NAME "Device-A"
 #define DEVICE_NAME_LEN 16
 
@@ -60,8 +63,9 @@ const static char *device_uuid_str = "8f8a223c-04f2-11ee-be56-0242ac120002";
 static uint8_t device_uuid[16] = { 0 };
 
 #if (0 == USE_FLASH)
-#define RING_BUFFER_SIZE 2048
-#define RING_BUFFER_BLE_SEND 280
+#define RING_BUFFER_SIZE 1024
+#define RING_BUFFER_BLE_SEND 350
+#define RING_BUFFER_BLE_SEND_UNTIL 50
 
 static uint32_t imu_data_count = 0;
 RingBuf<s_imu_data_t, RING_BUFFER_SIZE> imu_ring_buffer;
@@ -106,6 +110,7 @@ static void __print_buffer(uint8_t *buffer, uint32_t len);
 
 static void ble_thread_process(void);
 static void sensor_thread_process(void);
+static void __config_pedometer(bool clear_step_count);
 
 
 void setup() {
@@ -122,7 +127,7 @@ void setup() {
   if (myIMU.begin() != 0) {
     Serial.println("Accelerometer error");
   } else {
-    // Serial.println("Accelerometer OK!");
+    __config_pedometer(false);
   }
 
   rtc_pcf8563.begin();
@@ -191,10 +196,7 @@ static void ble_thread_process(void) {
       Serial.print(": BLE-thread:: Ring buffer read_pointer: ");
       Serial.println(imu_ring_buffer.size());
 
-      uint32_t retries = 5;
-      while (!send_to_ble_from_ring_buffer() && (retries--)) {
-        ThisThread::sleep_for(20ms);
-      }
+      send_to_ble_from_ring_buffer();
     }
 
     ThisThread::sleep_for(500);
@@ -207,6 +209,7 @@ static void sensor_thread_process(void) {
   ThisThread::sleep_for(5s);
   for (;;) {
     __updateAccelerometer();
+    __update_pedometer();
 #if (1 == USE_FLASH)
     __write_imu_data_to_flash_v2();
 #else
@@ -214,7 +217,7 @@ static void sensor_thread_process(void) {
     __print_buffer((uint8_t *)&imu_data, sizeof(s_imu_data_t));
     Serial.println("");
     // ThisThread::sleep_for(85ms);
-    ThisThread::sleep_for(85ms);
+    ThisThread::sleep_for(185ms);
 #endif
   }
 }
@@ -222,6 +225,21 @@ static void sensor_thread_process(void) {
 void loop() {
   digitalWrite(LED_BUILTIN, 1);
   delay(2000);
+}
+
+static void __update_pedometer(void) {
+  uint8_t dataByte = 0;
+  uint16_t stepCount = 0;
+
+  myIMU.readRegister(&dataByte, LSM6DS3_ACC_GYRO_STEP_COUNTER_H);
+  stepCount = (dataByte << 8) & 0xFFFF;
+
+  myIMU.readRegister(&dataByte, LSM6DS3_ACC_GYRO_STEP_COUNTER_L);
+  stepCount |= dataByte;
+
+  imu_data.pedometer = stepCount;
+  Serial.print("Pedometer: ");
+  Serial.println(stepCount);
 }
 
 static void __updateAccelerometer(void) {
@@ -334,7 +352,7 @@ static int send_to_ble_from_ring_buffer(void) {
         uint8_t ble_buffer[BLE_MTU_SIZE + DEVICE_NAME_LEN] = { 0 };
         snprintf((char *)ble_buffer, DEVICE_NAME_LEN, "%s", DEVICE_NAME);
 
-        while (imu_ring_buffer.size() >= RING_BUFFER_BLE_SEND) {
+        while (imu_ring_buffer.size() >= RING_BUFFER_BLE_SEND_UNTIL) {
           bool write_success = false;
           uint32_t item_read = __ring_buffer_read(ble_buffer + DEVICE_NAME_LEN, 7);
           if (item_read) {
@@ -343,7 +361,7 @@ static int send_to_ble_from_ring_buffer(void) {
             __print_buffer(ble_buffer, (item_read * sizeof(s_imu_data_t)) + DEVICE_NAME_LEN);
 
             uint32_t retries = 5;
-            while(retries-- && (false == write_success)) {
+            while (retries-- && (false == write_success)) {
               Serial.print(__LINE__);
               Serial.print(": BLE: data write faield - ");
               Serial.println(retries);
@@ -386,7 +404,6 @@ static int send_to_ble_from_ring_buffer(void) {
 
   return ret;
 }
-
 
 static void __ring_buffer_write(void) {
   if (imu_ring_buffer.isFull()) {
@@ -675,4 +692,33 @@ static void __blinky(long blinky_ms) {
       _on = 1;
     }
   }
+}
+
+static void __config_pedometer(bool clear_step_count) {
+  uint8_t errorAccumulator = 0;
+  uint8_t dataToWrite = 0;  //Temporary variable
+
+  //Setup the accelerometer******************************
+  dataToWrite = 0;
+
+  //  dataToWrite |= LSM6DS3_ACC_GYRO_BW_XL_200Hz;
+  dataToWrite |= LSM6DS3_ACC_GYRO_FS_XL_2g;
+  dataToWrite |= LSM6DS3_ACC_GYRO_ODR_XL_26Hz;
+
+
+  // Step 1: Configure ODR-26Hz and FS-8g
+  myIMU.writeRegister(LSM6DS3_ACC_GYRO_CTRL1_XL, dataToWrite);
+
+  // Step 2: Set bit Zen_G, Yen_G, Xen_G, FUNC_EN, PEDO_RST_STEP(1 or 0)
+  if (clear_step_count) {
+    myIMU.writeRegister(LSM6DS3_ACC_GYRO_CTRL10_C, 0x3E);
+  } else {
+    myIMU.writeRegister(LSM6DS3_ACC_GYRO_CTRL10_C, 0x3C);
+  }
+
+  // Step 3:	Enable pedometer algorithm
+  myIMU.writeRegister(LSM6DS3_ACC_GYRO_TAP_CFG1, 0x40);
+
+  //Step 4:	Step Detector interrupt driven to INT1 pin, set bit INT1_FIFO_OVR
+  myIMU.writeRegister(LSM6DS3_ACC_GYRO_INT1_CTRL, 0x10);
 }
