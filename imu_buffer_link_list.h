@@ -24,8 +24,8 @@ typedef struct s_imu_data {
   int16_t gyro_val_z;
 
   uint16_t pedometer;
-  uint16_t dummy;
-} s_imu_data_t;
+  uint16_t battery;
+} s_imu_data_t __attribute__ ((__packed__));
 
 typedef struct l_link_list {
   s_imu_data_t imu_data;

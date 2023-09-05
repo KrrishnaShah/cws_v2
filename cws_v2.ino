@@ -32,23 +32,48 @@ using namespace mbed;
 using namespace rtos;
 using namespace std::chrono_literals;
 
+#define ENABLE_DEBUG 0
+
+#if (1 == ENABLE_DEBUG)
+REDIRECT_STDOUT_TO(Serial)
+#define TRACE(X, REG...) \
+  { printf("%d: " X "\r\n", __LINE__, ##REG); }
+#else
+#define TRACE(X, REG...)
+#endif
+
 
 #define TEMP_POWER D3
 #define IMU_I2C_ADDRESS 0x6A
 
-#define DEVICE_NAME "Device-3"
-#define DEVICE_NAME_LEN 16
-#define BLE_MTU_SIZE (sizeof(s_imu_data_t) * 7)
+#define DEVICE_NAME "Cow-x"
 
-#define MAX_SAMPLE_COUNT 800
-#define BLE_START_TRANMISSION_COUNT 200
+#define DEVICE_NAME_LEN 16
+#define BLE_SAMPLE_COUNT 9
+#define BLE_MTU_SIZE (sizeof(s_imu_data_t) * BLE_SAMPLE_COUNT)
+static const uint32_t max_mtu_size = 240;
+
+#define MAX_SAMPLE_COUNT 1600
+#define BLE_START_TRANMISSION_COUNT 800
 #define BLE_RUN_TRANMISSION_UNTIL_COUNT 20
 
+// #define MAX_SAMPLE_COUNT 800
+// #define BLE_START_TRANMISSION_COUNT 20
+// #define BLE_RUN_TRANMISSION_UNTIL_COUNT 2
+
+static int battery_level = 0;
 static uint32_t imu_data_count = 0;
 
 static const char *cws_data_char_uuid = "e202";
 static const char *cws_time_char_uuid = "e203";
+static const char *cws_battery_char_uuid = "2a19";
 static const char *ble_gateway_name = "cws-gateway";
+// static const char *ble_gateway_address = "F4:C8:8A:F7:DB:F3"; // my pc
+static const char *ble_gateway_address = "B8:27:EB:23:D8:12";  // raspberry-pi
+
+#define USE_BLE_GATEWAY_NAME 1
+#define USE_BLE_GATEWAY_ADDRESS 2
+#define USE_BLE_GATEWAY_TYPE USE_BLE_GATEWAY_NAME
 
 static s_imu_data_t imu_data;
 
@@ -70,47 +95,47 @@ static void __imu_data_write_to_link_list(s_imu_data_t *new_imu_data);
 static uint32_t __imu_data_read_from_link_list(uint8_t *data, uint32_t count);
 
 void setup() {
-  pinMode(TEMP_POWER, OUTPUT);   // initialize the built-in LED pin to indicate when a central is connected
-  pinMode(LED_BUILTIN, OUTPUT);  // initialize the built-in LED pin to indicate when a central is connected
+// pinMode(TEMP_POWER, OUTPUT);   // initialize the built-in LED pin to indicate when a central is connected
+// pinMode(LED_BUILTIN, OUTPUT);  // initialize the built-in LED pin to indicate when a central is connected
 
-  digitalWrite(TEMP_POWER, HIGH);
+// digitalWrite(TEMP_POWER, HIGH);
+#if (1 == ENABLE_DEBUG)
   Serial.begin(250000);
+#endif
 
+#if 1
   NRF_WDT->CONFIG = 0x01;           // Configure WDT to run when CPU is asleep
   NRF_WDT->CRV = (10 * 32768) + 1;  // Timeout set to 120 seconds, timeout[s] = (CRV-1)/32768
   NRF_WDT->RREN = 0x01;             // Enable the RR[0] reload register
   NRF_WDT->TASKS_START = 1;         // Start WDT
 
   if (myIMU.begin() != 0) {
-    Serial.println("Accelerometer error");
+    TRACE("Accelerometer error");
   } else {
     __config_pedometer(false);
   }
 
   rtc_pcf8563.begin();
   if (rtc_pcf8563.isrunning()) {
-    // Serial.println("RTC is running.");
+    // TRACE("RTC is running.");
   } else {
-    Serial.println("RTC is NOT running!");
+    TRACE("RTC is NOT running!");
     // rtc_pcf8563.adjust(DateTime(__DATE__, __TIME__));
   }
 
   rtc_pcf8563.adjust(DateTime(2023, 1, 1, 0, 0, 0));
-  Serial.print("Size of data: ");
-  Serial.println(sizeof(s_imu_data_t));
+  TRACE("Size of data: %d", sizeof(s_imu_data_t));
 
   sensor_thread.start(sensor_thread_process);
   ble_thread.start(ble_thread_process);
+#endif
 }
 
 static void ble_thread_process(void) {
-  Serial.println("BLE thread is running");
+  TRACE("BLE thread is running");
   for (;;) {
     if (imu_buffer_data_count() > BLE_START_TRANMISSION_COUNT) {
-      Serial.print(__LINE__);
-      Serial.print(": BLE-thread:: Ring buffer read_pointer: ");
-      Serial.println(imu_buffer_data_count());
-
+      TRACE("BLE-thread:: Ring buffer read_pointer: ", imu_buffer_data_count());
       send_to_ble_from_link_list();
     }
 
@@ -119,25 +144,50 @@ static void ble_thread_process(void) {
 }
 
 static void sensor_thread_process(void) {
-  Serial.println("Sensor thread is running");
+  TRACE("Sensor thread is running");
   for (;;) {
     __updateAccelerometer();
     __update_pedometer();
     __imu_data_write_to_link_list(&imu_data);
-    __print_buffer((uint8_t *)&imu_data, sizeof(s_imu_data_t));
-    Serial.println("");
+    // __print_buffer((uint8_t *)&imu_data, sizeof(s_imu_data_t));
+    printf("\r\n");
     // ThisThread::sleep_for(35ms);
-    ThisThread::sleep_for(185ms);
+    ThisThread::sleep_for(150ms);
+    // ThisThread::sleep_for(1000ms);
   }
 }
 
+static const float bat_full_level = 3.7;
+static const float bat_empty_level = 2.0;
 
+static void updateBatteryLevel() {
+  // int battery = analogRead(A0);
+
+  digitalWrite(PIN_VBAT_ENABLE, LOW);
+  int battery = analogRead(PIN_VBAT);
+  digitalWrite(PIN_VBAT_ENABLE, HIGH);
+
+  TRACE("adc-value: %d", battery);
+  TRACE("Battery voltage: %f", 0.003395996F * battery);
+  battery = map(battery, 0, 1023, 0, 100);
+
+  if (battery != battery_level) {
+    TRACE("Battery Level is now: %d %%", battery);
+    battery_level = battery;
+  }
+}
+
+static uint32_t count = 0;
 void loop() {
-  static int led_state;
-  led_state ^= 1;
-  digitalWrite(LED_BUILTIN, led_state);
+  // static int led_state;
+  // led_state ^= 1;
+  // digitalWrite(LED_BUILTIN, led_state);
   NRF_WDT->RR[0] = WDT_RR_RR_Reload;
   delay(500);
+  // if (0 == (count++ % 30))
+  {
+    updateBatteryLevel();
+  }
 }
 
 static void __update_pedometer(void) {
@@ -151,37 +201,44 @@ static void __update_pedometer(void) {
   stepCount |= dataByte;
 
   imu_data.pedometer = stepCount;
-  Serial.print("Pedometer: ");
-  Serial.println(stepCount);
+  TRACE("Pedometer: %d", stepCount);
 }
 
 static void __updateAccelerometer(void) {
-  Serial.print(imu_data_count);
-  imu_data.acc_val_x = (int)(myIMU.readFloatAccelX() * 100);
-  imu_data.acc_val_y = (int)(myIMU.readFloatAccelY() * 100);
-  imu_data.acc_val_z = (int)(myIMU.readFloatAccelZ() * 100);
+  TRACE("total data count: %d", imu_data_count);
+  // float acc_x = myIMU.readFloatAccelX() * 100;
+  // float acc_y = myIMU.readFloatAccelY() * 100;
+  // float acc_z = myIMU.readFloatAccelY() * 100;
 
-  imu_data.gyro_val_x = (int)(myIMU.readFloatGyroX() * 100);
-  imu_data.gyro_val_y = (int)(myIMU.readFloatGyroY() * 100);
-  imu_data.gyro_val_z = (int)(myIMU.readFloatGyroZ() * 100);
+  // TRACE("acc_x: %f, %d, %d", acc_x, (int)acc_x, (int16_t)acc_x);
+  // TRACE("acc_y: %f, %d, %d", acc_y, (int)acc_y, (int16_t)acc_y);
+  // TRACE("acc_z: %f, %d, %d", acc_z, (int)acc_z, (int16_t)acc_z);
+
+  imu_data.acc_val_x = (int16_t)(myIMU.readFloatAccelX() * 100);
+  imu_data.acc_val_y = (int16_t)(myIMU.readFloatAccelY() * 100);
+  imu_data.acc_val_z = (int16_t)(myIMU.readFloatAccelZ() * 100);
+
+  imu_data.gyro_val_x = (int16_t)(myIMU.readFloatGyroX() * 100);
+  imu_data.gyro_val_y = (int16_t)(myIMU.readFloatGyroY() * 100);
+  imu_data.gyro_val_z = (int16_t)(myIMU.readFloatGyroZ() * 100);
 
   imu_data.sn = imu_data_count++;
 
   DateTime now = rtc_pcf8563.now();
   imu_data.epoch_time = now.unixtime();
 
-  Serial.print(": ");
-  Serial.println(imu_data.epoch_time);
-  Serial.print("Data in link list: ");
-  Serial.println(imu_buffer_data_count());
+  imu_data.battery = (int16_t)battery_level;
+  TRACE("(%d) Data in link list: %d", imu_data.epoch_time, imu_buffer_data_count());
 
 #if 0
+  Serial.print("count: ");
+  Serial.println(imu_data.sn);
   Serial.print("acc-x: ");
   Serial.print(imu_data.acc_val_x / 100.0);
   Serial.print(", acc-y: ");
   Serial.print(imu_data.acc_val_y / 100.0);
   Serial.print(", acc-z: ");
-  Serial.print(imu_data.acc_val_z / 100.0);
+  Serial.println(imu_data.acc_val_z / 100.0);
 
   Serial.print(", gyro-x: ");
   Serial.print(imu_data.gyro_val_x / 100.0);
@@ -191,7 +248,6 @@ static void __updateAccelerometer(void) {
   Serial.println(imu_data.gyro_val_z / 100.0);
 #endif
 }
-
 static void __print_buffer(uint8_t *data_buffer, uint32_t len) {
   bool break_val = 0;
   for (int i = 0; i < 16; i++) {
@@ -215,40 +271,73 @@ static void __print_buffer(uint8_t *data_buffer, uint32_t len) {
     if (break_val)
       break;
   }
-  Serial.println("");
+  printf("\r\n");
 }
-
 static int send_to_ble_from_link_list(void) {
   int ret = 0;
   if (BLE.begin()) {
-    if (BLE.scanForName(ble_gateway_name)) {
+#if (USE_BLE_GATEWAY_TYPE == USE_BLE_GATEWAY_NAME)
+    if (BLE.scanForName(ble_gateway_name))
+#elif (USE_BLE_GATEWAY_TYPE == USE_BLE_GATEWAY_ADDRESS)
+    if (BLE.scanForAddress(ble_gateway_address))
+#endif
+    {
       ThisThread::sleep_for(50ms);
-
+      uint32_t count = 20;
       BLEDevice peripheral = BLE.available();
+      while (count--) {
+        if (peripheral) {
+          TRACE("Found BLE Device");
+          break;
+        }
+        ThisThread::sleep_for(50ms);
+        peripheral = BLE.available();
+      }
+
       if (peripheral) {
         BLE.stopScan();
 
         if (peripheral.connect()) {
           if (!peripheral.discoverAttributes()) {
-            Serial.println("Attribute discovery failed!");
-            peripheral.disconnect();
+            TRACE("Attribute discovery failed!");
+            // peripheral.disconnect();
+          }
+
+          TRACE("Number of Services: %d", peripheral.serviceCount());
+          for (int i = 0; i < peripheral.serviceCount(); i++) {
+            BLEService service = peripheral.service(i);
+            TRACE("Service found: %s", service.uuid());
+            TRACE("Number of Characterstics: %d", service.characteristicCount());
+            for (int j = 0; j < service.characteristicCount(); j++) {
+              BLECharacteristic characteristic = service.characteristic(j);
+              TRACE("Characteristics found: %s", characteristic.uuid());
+            }
           }
 
           BLECharacteristic imu_data_char = peripheral.characteristic(cws_data_char_uuid);
           if (!imu_data_char) {
-            Serial.println("Peripheral does not have imu characteristic!");
+            TRACE("Peripheral does not have imu characteristic!");
             peripheral.disconnect();
           } else if (!imu_data_char.canWrite()) {
-            Serial.println("Peripheral does not have a writable imu characteristic!");
+            TRACE("Peripheral does not have a writable imu characteristic!");
             peripheral.disconnect();
           }
 
           BLECharacteristic imu_time_char = peripheral.characteristic(cws_time_char_uuid);
           if (!imu_time_char) {
-            Serial.println("Peripheral does not have imu characteristic!");
+            printf("%d: Peripheral does not have imu characteristic!", __LINE__);
             peripheral.disconnect();
           } else if (!imu_time_char.canRead()) {
-            Serial.println("Peripheral does not have a readable imu characteristic!");
+            printf("Peripheral does not have a readable imu characteristic!");
+            peripheral.disconnect();
+          }
+
+          BLECharacteristic imu_battery_char = peripheral.characteristic(cws_battery_char_uuid);
+          if (!imu_time_char) {
+            TRACE("Peripheral does not have imu characteristic!");
+            peripheral.disconnect();
+          } else if (!imu_time_char.canRead()) {
+            TRACE("Peripheral does not have a readable imu characteristic!");
             peripheral.disconnect();
           }
 
@@ -258,15 +347,12 @@ static int send_to_ble_from_link_list(void) {
 
             while (imu_buffer_data_count() >= BLE_RUN_TRANMISSION_UNTIL_COUNT) {
               bool write_success = 0;
-              uint32_t item_read = __imu_data_read_from_link_list(ble_buffer + DEVICE_NAME_LEN, 7);
+              uint32_t item_read = __imu_data_read_from_link_list(ble_buffer + DEVICE_NAME_LEN, BLE_SAMPLE_COUNT);
               if (item_read) {
-                Serial.println("265: Sending to ble: ");
-                __print_buffer(ble_buffer, (item_read * sizeof(s_imu_data_t)) + DEVICE_NAME_LEN);
-
+                write_success = imu_data_char.writeValue(ble_buffer, (item_read * sizeof(s_imu_data_t) + DEVICE_NAME_LEN));
                 uint32_t retries = 5;
                 while (retries-- && (false == write_success)) {
-                  Serial.print("269: BLE: data write faield - ");
-                  Serial.println(retries);
+                  TRACE("BLE: data write faield - count: ", retries);
                   write_success = imu_data_char.writeValue(ble_buffer, (item_read * sizeof(s_imu_data_t) + DEVICE_NAME_LEN));
                 }
 
@@ -274,45 +360,48 @@ static int send_to_ble_from_link_list(void) {
                   break;
                 }
               } else {
-                Serial.println("278 - __ring_buffer_read failed!");
+                TRACE("343 - __ring_buffer_read failed!");
               }
-
-              ThisThread::sleep_for(1ms);
 
               if (write_success) {
                 ret = 1;
               }
             }
 
-            time_t epoch_time = 0;
-            if (imu_time_char.readValue(&epoch_time, sizeof(time_t))) {
-              rtc_pcf8563.adjust(DateTime(epoch_time));
+            uint32_t epoch_time = 0;
+            if (imu_time_char.readValue(&epoch_time, 4)) {
+              if (epoch_time > 1693807481) {
+                TRACE("timer raeding: %d", epoch_time);
+                rtc_pcf8563.adjust(DateTime(epoch_time));
+                ThisThread::sleep_for(5000ms);
+              } else {
+                TRACE("ERROR: timer raeding failed: %d", epoch_time);
+                ThisThread::sleep_for(5000ms);
+              }
             } else {
-              Serial.println("294 - Ble time read failed!");
+              TRACE("355 - Ble time read failed!");
             }
 
+            imu_battery_char.writeValue(&battery_level, sizeof(int));
+
             peripheral.disconnect();
-            Serial.println(epoch_time);
+            TRACE("epoch_time: ", epoch_time);
           } else {
-            Serial.println("300 - BLE connection failed!");
+            TRACE("BLE connection failed!");
           }
         } else {
-          Serial.println("303 - Failed to connect!");
+          TRACE("Failed to connect!");
         }
       } else {
-        Serial.println("\r\nError: peripheral not found!\r\n");
+        TRACE("\r\nError: peripheral not found!\r\n");
       }
-
       if (peripheral.connected()) {
         peripheral.disconnect();
       }
-
       BLE.stopScan();
     }
-
     BLE.end();
   }
-
   return ret;
 }
 
@@ -321,12 +410,12 @@ static void __imu_data_write_to_link_list(s_imu_data_t *new_imu_data) {
     l_link_list_t *tmp_data = imu_buffer_link_list_pop();
     if (tmp_data) {
       free(tmp_data);
-      // Serial.println()
+      // TRACE()
     }
   }
 
   if (0 == imu_buffer_link_list_push(new_imu_data)) {
-    Serial.println("Malloc Failed!");
+    TRACE("Malloc Failed!");
     while (1) {}
   }
 }
