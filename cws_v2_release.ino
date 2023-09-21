@@ -27,12 +27,13 @@
 #include <Wire.h>
 #include <UUID.h>
 #include "imu_buffer_link_list.h"
+#include "timer_int.h"
 
 using namespace mbed;
 using namespace rtos;
 using namespace std::chrono_literals;
 
-#define ENABLE_DEBUG 0
+#define ENABLE_DEBUG 1
 
 #if (1 == ENABLE_DEBUG)
 REDIRECT_STDOUT_TO(Serial)
@@ -103,6 +104,8 @@ void setup() {
   Serial.begin(250000);
 #endif
 
+  timer_int_init();
+
 #if 1
   NRF_WDT->CONFIG = 0x01;           // Configure WDT to run when CPU is asleep
   NRF_WDT->CRV = (10 * 32768) + 1;  // Timeout set to 120 seconds, timeout[s] = (CRV-1)/32768
@@ -146,13 +149,14 @@ static void ble_thread_process(void) {
 static void sensor_thread_process(void) {
   TRACE("Sensor thread is running");
   for (;;) {
+    timer_int_wait();
     __updateAccelerometer();
     __update_pedometer();
     __imu_data_write_to_link_list(&imu_data);
     // __print_buffer((uint8_t *)&imu_data, sizeof(s_imu_data_t));
     printf("\r\n");
     // ThisThread::sleep_for(35ms);
-    ThisThread::sleep_for(150ms);
+    // ThisThread::sleep_for(150ms);
     // ThisThread::sleep_for(1000ms);
   }
 }
@@ -206,14 +210,6 @@ static void __update_pedometer(void) {
 
 static void __updateAccelerometer(void) {
   TRACE("total data count: %d", imu_data_count);
-  // float acc_x = myIMU.readFloatAccelX() * 100;
-  // float acc_y = myIMU.readFloatAccelY() * 100;
-  // float acc_z = myIMU.readFloatAccelY() * 100;
-
-  // TRACE("acc_x: %f, %d, %d", acc_x, (int)acc_x, (int16_t)acc_x);
-  // TRACE("acc_y: %f, %d, %d", acc_y, (int)acc_y, (int16_t)acc_y);
-  // TRACE("acc_z: %f, %d, %d", acc_z, (int)acc_z, (int16_t)acc_z);
-
   imu_data.acc_val_x = (int16_t)(myIMU.readFloatAccelX() * 100);
   imu_data.acc_val_y = (int16_t)(myIMU.readFloatAccelY() * 100);
   imu_data.acc_val_z = (int16_t)(myIMU.readFloatAccelZ() * 100);
@@ -231,23 +227,12 @@ static void __updateAccelerometer(void) {
   TRACE("(%d) Data in link list: %d", imu_data.epoch_time, imu_buffer_data_count());
 
 #if 0
-  Serial.print("count: ");
-  Serial.println(imu_data.sn);
-  Serial.print("acc-x: ");
-  Serial.print(imu_data.acc_val_x / 100.0);
-  Serial.print(", acc-y: ");
-  Serial.print(imu_data.acc_val_y / 100.0);
-  Serial.print(", acc-z: ");
-  Serial.println(imu_data.acc_val_z / 100.0);
-
-  Serial.print(", gyro-x: ");
-  Serial.print(imu_data.gyro_val_x / 100.0);
-  Serial.print(", gyro-y: ");
-  Serial.print(imu_data.gyro_val_y / 100.0);
-  Serial.print(", gyro-z: ");
-  Serial.println(imu_data.gyro_val_z / 100.0);
+  TRACE("count: %u", imu_data->sn);
+  TRACE("acc-x: %f, acc-y: %f, acc-z: %f", imu_data->acc_val_x / 100.0, imu_data->acc_val_y / 100.0, imu_data->acc_val_z / 100.0);
+  TRACE("acc-x: %f, acc-y: %f, acc-z: %f", imu_data->gyro_val_x / 100.0, imu_data->gyro_val_y / 100.0, imu_data->gyro_val_z / 100.0);
 #endif
 }
+
 static void __print_buffer(uint8_t *data_buffer, uint32_t len) {
   bool break_val = 0;
   for (int i = 0; i < 16; i++) {
@@ -268,20 +253,17 @@ static void __print_buffer(uint8_t *data_buffer, uint32_t len) {
       }
     }
 
-    if (break_val)
+    if (break_val) {
       break;
+    }
   }
   printf("\r\n");
 }
+
 static int send_to_ble_from_link_list(void) {
   int ret = 0;
   if (BLE.begin()) {
-#if (USE_BLE_GATEWAY_TYPE == USE_BLE_GATEWAY_NAME)
-    if (BLE.scanForName(ble_gateway_name))
-#elif (USE_BLE_GATEWAY_TYPE == USE_BLE_GATEWAY_ADDRESS)
-    if (BLE.scanForAddress(ble_gateway_address))
-#endif
-    {
+    if (BLE.scanForName(ble_gateway_name)) {
       ThisThread::sleep_for(50ms);
       uint32_t count = 20;
       BLEDevice peripheral = BLE.available();
@@ -303,6 +285,7 @@ static int send_to_ble_from_link_list(void) {
             // peripheral.disconnect();
           }
 
+#if 0
           TRACE("Number of Services: %d", peripheral.serviceCount());
           for (int i = 0; i < peripheral.serviceCount(); i++) {
             BLEService service = peripheral.service(i);
@@ -313,6 +296,7 @@ static int send_to_ble_from_link_list(void) {
               TRACE("Characteristics found: %s", characteristic.uuid());
             }
           }
+#endif
 
           BLECharacteristic imu_data_char = peripheral.characteristic(cws_data_char_uuid);
           if (!imu_data_char) {
