@@ -24,11 +24,11 @@ typedef struct s_imu_data {
   int16_t gyro_val_z;
 
   uint16_t pedometer;
-  uint16_t battery;
+  // uint16_t battery;
 } s_imu_data_t __attribute__ ((__packed__));
 
 typedef struct l_link_list {
-  s_imu_data_t imu_data;
+  uint8_t imu_data[22];
   struct l_link_list *next;
   struct l_link_list *prev;
 } l_link_list_t;

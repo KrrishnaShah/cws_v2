@@ -10,18 +10,21 @@
             ],
             "intelliSenseMode": "gcc-x64",
             "includePath": [
-                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.1/cores/arduino",
-                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.1/variants/SEEED_XIAO_NRF52840_SENSE",
-                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.1/libraries/Wire",
+                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.2/cores/arduino",
+                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.2/variants/SEEED_XIAO_NRF52840_SENSE",
                 "/home/krishna/Arduino/libraries/Seeed_Arduino_LSM6DS3",
                 "/home/krishna/Arduino/libraries/ArduinoBLE/src",
                 "/home/krishna/Arduino/libraries/Adafruit_MLX90614_Library",
                 "/home/krishna/Arduino/libraries/Adafruit_BusIO",
+                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.2/libraries/Wire",
                 "/home/krishna/Arduino/libraries/RTClib/src",
                 "/home/krishna/Arduino/libraries/SPIMemory/src",
-                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.1/libraries/SPI",
-                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.1/cores/arduino/api/deprecated",
-                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.1/cores/arduino/api/deprecated-avr-comp",
+                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.2/libraries/SPI",
+                "/home/krishna/Arduino/libraries/NRF52_MBED_TimerInterrupt/src",
+                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.2/cores/arduino/api/deprecated",
+                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.2/cores/arduino/api/deprecated-avr-comp",
+                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.2/cores/arduino/mbed/targets/TARGET_NORDIC/TARGET_NRF5x/TARGET_SDK_15_0/components/nfc/t2t_lib",
+                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.2/cores/arduino/mbed/targets/TARGET_NORDIC/TARGET_NRF5x/TARGET_SDK_15_0/components/nfc/t2t_lib/hal_t2t",
                 "/home/krishna/.arduino15/packages/Seeeduino/tools/arm-none-eabi-gcc/7-2017q4/arm-none-eabi/include/c++/7.2.1",
                 "/home/krishna/.arduino15/packages/Seeeduino/tools/arm-none-eabi-gcc/7-2017q4/arm-none-eabi/include/c++/7.2.1/arm-none-eabi",
                 "/home/krishna/.arduino15/packages/Seeeduino/tools/arm-none-eabi-gcc/7-2017q4/arm-none-eabi/include/c++/7.2.1/backward",
@@ -30,7 +33,7 @@
                 "/home/krishna/.arduino15/packages/Seeeduino/tools/arm-none-eabi-gcc/7-2017q4/arm-none-eabi/include"
             ],
             "forcedInclude": [
-                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.1/cores/arduino/Arduino.h"
+                "/home/krishna/.arduino15/packages/Seeeduino/hardware/mbed/2.9.2/cores/arduino/Arduino.h"
             ],
             "cStandard": "c11",
             "cppStandard": "c++11",

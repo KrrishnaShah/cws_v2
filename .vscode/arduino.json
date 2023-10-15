@@ -2,5 +2,5 @@
     "board": "Seeeduino:mbed:xiaonRF52840Sense",
     "port": "/dev/ttyACM0",
     "programmer": "cmsis-dap",
-    "sketch": "cws_v2.ino"
+    "sketch": "cws_v2_release.ino"
 }
